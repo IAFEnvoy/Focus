@@ -7,6 +7,7 @@ const GREEN_HIGHLIGHT_MS = 1000;
 const SLOT_COUNT = 8;
 const MOVE_ANIMATION_MS = 380;
 const FINAL_LAYOUT_MS = 780;
+const BGM_VOLUME = 0.75;
 const BASE_ORANGE = "#ff2800";
 const TARGET_GREEN = "#43cf61";
 const FINAL_COLORS = ["#ff4d4f", "#b9f68f", "#97ddff", "#af82ff", "#ffd86a", "#48cd58", "#3589ff", "#ff8fc7"];
@@ -19,6 +20,9 @@ const SPECIAL_PAIR_ARC_HORIZONTAL_OFFSET = 14;
 const SPECIAL_PAIR_ARC_VERTICAL_OFFSET = 12;
 const SPECIAL_BLOCK_ARC_HORIZONTAL_OFFSET = 7;
 const SPECIAL_BLOCK_ARC_VERTICAL_OFFSET = 6;
+const MOBILE_LAYOUT_MAX_WIDTH = 768;
+const MOBILE_MOVE_INTERVAL_MS = 480;
+const MOBILE_MOVE_MIN_REST_MS = 120;
 
 const GRID_COORDS = [
   { x: 29, y: 13 },
@@ -32,14 +36,14 @@ const GRID_COORDS = [
 ];
 
 const CIRCLE_COORDS = [
-  { x: 50, y: 13 },
-  { x: 73.5, y: 24 },
-  { x: 82, y: 50 },
-  { x: 73.5, y: 76 },
-  { x: 50, y: 87 },
-  { x: 26.5, y: 76 },
-  { x: 18, y: 50 },
-  { x: 26.5, y: 24 }
+  { x: 50, y: 27 },
+  { x: 74, y: 34 },
+  { x: 84, y: 50 },
+  { x: 74, y: 66 },
+  { x: 50, y: 73 },
+  { x: 26, y: 66 },
+  { x: 16, y: 50 },
+  { x: 26, y: 34 }
 ];
 
 const state = {
@@ -125,6 +129,7 @@ function preloadBgm() {
   }
 
   bgmAudio.loop = false;
+  bgmAudio.volume = normalizeVolume(BGM_VOLUME);
   bgmAudio.preload = "auto";
   bgmAudio.load();
 }
@@ -135,6 +140,7 @@ function playBgmOnce() {
   }
 
   bgmAudio.loop = false;
+  bgmAudio.volume = normalizeVolume(BGM_VOLUME);
   bgmAudio.currentTime = 0;
 
   const playPromise = bgmAudio.play();
@@ -203,18 +209,32 @@ async function runSequence() {
 }
 
 async function runMoves() {
-  const moveAnimationMs = Math.min(MOVE_ANIMATION_MS, MOVE_INTERVAL_MS);
+  const runtimeMoveConfig = getRuntimeMoveConfig();
+  const moveAnimationMs = runtimeMoveConfig.animationMs;
   setMoveDuration(moveAnimationMs);
-  const movePlan = buildMovePlan(MOVE_COUNT);
+  const movePlan = buildMovePlan(runtimeMoveConfig.count);
 
   for (const mode of movePlan) {
     await executeMoveMode(mode, moveAnimationMs);
 
-    const restMs = Math.max(0, MOVE_INTERVAL_MS - moveAnimationMs);
+    const restMs = Math.max(0, runtimeMoveConfig.intervalMs - moveAnimationMs);
     if (restMs > 0) {
       await wait(restMs);
     }
   }
+}
+
+function getRuntimeMoveConfig() {
+  const isMobileLayout = window.matchMedia(`(max-width: ${MOBILE_LAYOUT_MAX_WIDTH}px)`).matches;
+  const intervalMs = isMobileLayout ? Math.max(MOVE_INTERVAL_MS, MOBILE_MOVE_INTERVAL_MS) : MOVE_INTERVAL_MS;
+  const minRestMs = isMobileLayout ? MOBILE_MOVE_MIN_REST_MS : 0;
+  const animationMs = Math.max(160, Math.min(MOVE_ANIMATION_MS, intervalMs - minRestMs));
+
+  return {
+    count: MOVE_COUNT,
+    intervalMs,
+    animationMs
+  };
 }
 
 function buildMovePlan(totalMoves) {
@@ -229,21 +249,65 @@ function buildMovePlan(totalMoves) {
     throw new Error("运动模式配置错误：缺少可用动作。");
   }
 
-  const plan = Array.from(
-    { length: totalMoves },
-    () => normalModes[Math.floor(Math.random() * normalModes.length)]
-  );
+  const specialIndexSet = pickRandomIndexSet(totalMoves, SPECIAL_MOVE_REQUIRED_COUNT);
+  const plan = [];
 
-  const specialIndexes = new Set();
-  while (specialIndexes.size < SPECIAL_MOVE_REQUIRED_COUNT) {
-    specialIndexes.add(Math.floor(Math.random() * totalMoves));
+  for (let i = 0; i < totalMoves; i += 1) {
+    if (specialIndexSet.has(i)) {
+      if (wouldCreateTriple(plan, specialMode)) {
+        throw new Error("运动模式配置错误：特殊动作导致三连。请调整动作参数。");
+      }
+
+      plan.push(specialMode);
+      continue;
+    }
+
+    const availableModes = normalModes.filter((mode) => !wouldCreateTriple(plan, mode));
+    if (availableModes.length === 0) {
+      throw new Error("运动模式配置错误：无法生成不重复三连的序列。");
+    }
+
+    plan.push(pickRandomMode(availableModes));
   }
 
-  for (const index of specialIndexes) {
-    plan[index] = specialMode;
+  if (hasTripleRepeat(plan)) {
+    throw new Error("运动模式配置错误：生成序列仍存在三连。");
   }
 
   return plan;
+}
+
+function pickRandomIndexSet(length, count) {
+  const indexSet = new Set();
+  while (indexSet.size < count) {
+    indexSet.add(Math.floor(Math.random() * length));
+  }
+  return indexSet;
+}
+
+function pickRandomMode(modes) {
+  return modes[Math.floor(Math.random() * modes.length)];
+}
+
+function wouldCreateTriple(plan, nextMode) {
+  const length = plan.length;
+  if (length < 2) {
+    return false;
+  }
+
+  return plan[length - 1].id === nextMode.id && plan[length - 2].id === nextMode.id;
+}
+
+function hasTripleRepeat(plan) {
+  for (let i = 2; i < plan.length; i += 1) {
+    const sameAsPrev = plan[i].id === plan[i - 1].id;
+    const sameAsPrevPrev = plan[i].id === plan[i - 2].id;
+    if (sameAsPrev && sameAsPrevPrev) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function executeMoveMode(mode, moveAnimationMs) {
@@ -362,6 +426,7 @@ function createCurveMotion(key, fromPoint, controlPoint, toPoint, rotateDeltaDeg
     fromPoint,
     controlPoint,
     toPoint,
+    hasRotation: rotateDeltaDeg !== 0,
     startRotationDeg,
     endRotationDeg: startRotationDeg + rotateDeltaDeg
   };
@@ -392,9 +457,12 @@ async function animateCurveMotions(motions, durationMs) {
 
       for (const motion of motions) {
         const point = getQuadraticBezierPoint(motion.fromPoint, motion.controlPoint, motion.toPoint, easedT);
-        const rotationDeg = motion.startRotationDeg + (motion.endRotationDeg - motion.startRotationDeg) * easedT;
         setKeyPosition(motion.key, point.x, point.y);
-        setKeyRotationVisual(motion.key, rotationDeg);
+
+        if (motion.hasRotation) {
+          const rotationDeg = motion.startRotationDeg + (motion.endRotationDeg - motion.startRotationDeg) * easedT;
+          setKeyRotationVisual(motion.key, rotationDeg);
+        }
       }
 
       if (rawT < 1) {
@@ -411,7 +479,10 @@ async function animateCurveMotions(motions, durationMs) {
   for (const motion of motions) {
     setKeyPosition(motion.key, motion.toPoint.x, motion.toPoint.y);
     motion.key.rotationDeg = normalizeDegrees(motion.endRotationDeg);
-    setKeyRotationVisual(motion.key, motion.key.rotationDeg);
+
+    if (motion.hasRotation) {
+      setKeyRotationVisual(motion.key, motion.key.rotationDeg);
+    }
   }
 }
 
@@ -434,6 +505,10 @@ function clampToUnit(value) {
 function normalizeDegrees(deg) {
   const normalized = deg % 360;
   return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function normalizeVolume(volume) {
+  return Math.max(0, Math.min(1, volume));
 }
 
 async function transitionToFinalCircle() {
