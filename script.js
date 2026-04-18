@@ -7,6 +7,13 @@ const GREEN_HIGHLIGHT_MS = 1000;
 const SLOT_COUNT = 8;
 const MOVE_ANIMATION_MS = 380;
 const FINAL_LAYOUT_MS = 780;
+const FINAL_ENTRY_MOVE_MS = 320;
+const FINAL_ENTRY_STAGGER_MS = Math.round(FINAL_ENTRY_MOVE_MS / 4);
+const FINAL_ORBIT_SPEED_DEG_PER_SEC = 14;
+const FINAL_ELLIPSE_CENTER_X = 50;
+const FINAL_ELLIPSE_CENTER_Y = 50;
+const FINAL_ELLIPSE_RADIUS_X = 34;
+const FINAL_ELLIPSE_RADIUS_Y = 23;
 const BGM_VOLUME = 0.75;
 const BASE_ORANGE = "#ff2800";
 const TARGET_GREEN = "#43cf61";
@@ -35,22 +42,19 @@ const GRID_COORDS = [
   { x: 71, y: 82 }
 ];
 
-const CIRCLE_COORDS = [
-  { x: 50, y: 27 },
-  { x: 74, y: 34 },
-  { x: 84, y: 50 },
-  { x: 74, y: 66 },
-  { x: 50, y: 73 },
-  { x: 26, y: 66 },
-  { x: 16, y: 50 },
-  { x: 26, y: 34 }
-];
+const CIRCLE_COORDS = Array.from(
+  { length: SLOT_COUNT },
+  (_, slot) => getEllipseOrbitPointBySlot(slot, 0)
+);
 
 const state = {
   keys: [],
   highlightedKeyId: null,
   canSelect: false,
-  layout: "grid"
+  layout: "grid",
+  finalOrbitFrameId: null,
+  finalOrbitPhaseRad: 0,
+  finalOrbitRunning: false
 };
 
 const startBtn = document.getElementById("startBtn");
@@ -184,6 +188,8 @@ function initializeKeys() {
 }
 
 async function runSequence() {
+  stopFinalOrbit();
+
   startBtn.disabled = true;
   startBtn.classList.add("is-hidden");
   board.classList.add("is-visible");
@@ -512,8 +518,7 @@ function normalizeVolume(volume) {
 }
 
 async function transitionToFinalCircle() {
-  setMoveDuration(FINAL_LAYOUT_MS);
-  applyLayout("circle");
+  stopFinalOrbit();
 
   for (const key of state.keys) {
     const finalColor = FINAL_COLORS[key.slot];
@@ -521,7 +526,85 @@ async function transitionToFinalCircle() {
     key.el.style.setProperty("--key-glow", `${hexToRgba(finalColor, 0.56)}`);
   }
 
-  await wait(FINAL_LAYOUT_MS + 120);
+  const orderedKeys = [...state.keys].sort((a, b) => a.slot - b.slot);
+  setMoveDuration(FINAL_ENTRY_MOVE_MS);
+  const entryStaggerMs = Math.max(0, FINAL_ENTRY_STAGGER_MS);
+
+  for (let i = 0; i < orderedKeys.length; i += 1) {
+    const key = orderedKeys[i];
+    const targetPoint = CIRCLE_COORDS[key.slot];
+    const spinTargetDeg = (key.rotationDeg ?? 0) + 360;
+
+    key.rotationDeg = spinTargetDeg;
+    setKeyRotationVisual(key, spinTargetDeg);
+    setKeyPosition(key, targetPoint.x, targetPoint.y);
+
+    if (i < orderedKeys.length - 1 && entryStaggerMs > 0) {
+      await wait(entryStaggerMs);
+    }
+  }
+
+  await wait(FINAL_ENTRY_MOVE_MS);
+
+  setMoveDuration(0);
+  for (const key of state.keys) {
+    key.rotationDeg = normalizeDegrees(key.rotationDeg ?? 0);
+    setKeyRotationVisual(key, key.rotationDeg);
+  }
+
+  startFinalOrbit();
+}
+
+function startFinalOrbit() {
+  stopFinalOrbit();
+
+  if (FINAL_ORBIT_SPEED_DEG_PER_SEC <= 0) {
+    return;
+  }
+
+  state.finalOrbitRunning = true;
+  state.finalOrbitPhaseRad = 0;
+
+  const speedRadPerMs = ((FINAL_ORBIT_SPEED_DEG_PER_SEC * Math.PI) / 180) / 1000;
+  let previousTs = performance.now();
+
+  const orbitFrame = (ts) => {
+    if (!state.finalOrbitRunning) {
+      return;
+    }
+
+    const deltaMs = ts - previousTs;
+    previousTs = ts;
+
+    state.finalOrbitPhaseRad = (state.finalOrbitPhaseRad + speedRadPerMs * deltaMs) % (Math.PI * 2);
+    for (const key of state.keys) {
+      const point = getEllipseOrbitPointBySlot(key.slot, state.finalOrbitPhaseRad);
+      setKeyPosition(key, point.x, point.y);
+    }
+
+    state.finalOrbitFrameId = requestAnimationFrame(orbitFrame);
+  };
+
+  state.finalOrbitFrameId = requestAnimationFrame(orbitFrame);
+}
+
+function stopFinalOrbit() {
+  state.finalOrbitRunning = false;
+
+  if (state.finalOrbitFrameId !== null) {
+    cancelAnimationFrame(state.finalOrbitFrameId);
+    state.finalOrbitFrameId = null;
+  }
+}
+
+function getEllipseOrbitPointBySlot(slot, phaseRad) {
+  const baseAngle = -Math.PI / 2 + (slot * Math.PI * 2) / SLOT_COUNT;
+  const angle = baseAngle + phaseRad;
+
+  return {
+    x: FINAL_ELLIPSE_CENTER_X + FINAL_ELLIPSE_RADIUS_X * Math.cos(angle),
+    y: FINAL_ELLIPSE_CENTER_Y + FINAL_ELLIPSE_RADIUS_Y * Math.sin(angle)
+  };
 }
 
 function enableSelection() {
@@ -539,6 +622,7 @@ function handleKeySelection(id) {
   }
 
   state.canSelect = false;
+  stopFinalOrbit();
   board.classList.remove("is-selectable");
 
   for (const key of state.keys) {
